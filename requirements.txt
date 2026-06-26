@@ -1,0 +1,5 @@
+altair
+feedparser
+pandas
+requests
+streamlit
