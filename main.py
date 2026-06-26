@@ -6,7 +6,6 @@ import re
 from datetime import date, datetime
 
 import feedparser
-import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -25,9 +24,12 @@ ECOS_API_KEY = get_config_value("ECOS_API_KEY")
 FRED_API_KEY = get_config_value("FRED_API_KEY")
 
 ECOS_BASE = f"https://ecos.bok.or.kr/api/StatisticSearch/{ECOS_API_KEY}/json/kr"
+ECOS_ITEM_BASE = f"https://ecos.bok.or.kr/api/StatisticItemList/{ECOS_API_KEY}/json/kr"
 FRED_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 FRED_FETCH_ERRORS: dict[str, str] = {}
 ECOS_FETCH_ERRORS: dict[str, str] = {}
+MARKET_PROXY_ERRORS: dict[str, str] = {}
 
 START_MONTH = "201501"
 START_DAY = "20150101"
@@ -78,6 +80,55 @@ DOMESTIC_SERIES = {
         "items": ["010150000"],
         "unit": "%",
         "description": "은행 간 단기자금 금리입니다. 은행 차입과 단기 유동성 여건을 보는 데 씁니다.",
+    },
+    "CD 91일": {
+        "stat": "817Y002",
+        "cycle": "D",
+        "keywords": ["CD", "91"],
+        "unit": "%",
+        "description": "은행 양도성예금증서 금리입니다. 은행권 단기 조달비용과 변동금리 대출 기준금리의 압력을 봅니다.",
+    },
+    "CP 91일": {
+        "stat": "817Y002",
+        "cycle": "D",
+        "keywords": ["CP", "91"],
+        "unit": "%",
+        "description": "기업어음 금리입니다. 기업 단기자금 조달 비용과 단기 신용경색 여부를 빠르게 보여줍니다.",
+    },
+    "KORIBOR 1개월": {
+        "stat": "817Y002",
+        "cycle": "D",
+        "keywords": ["KORIBOR", "1개월"],
+        "unit": "%",
+        "description": "1개월 은행 간 단기자금 금리입니다. 초단기 원화 유동성 부담을 봅니다.",
+    },
+    "KORIBOR 6개월": {
+        "stat": "817Y002",
+        "cycle": "D",
+        "keywords": ["KORIBOR", "6개월"],
+        "unit": "%",
+        "description": "6개월 은행 간 단기자금 금리입니다. 중단기 조달비용과 금리 기대를 함께 반영합니다.",
+    },
+    "원/달러": {
+        "stat": "731Y001",
+        "cycle": "D",
+        "items": ["0000001"],
+        "unit": "원",
+        "description": "원화 기준 달러 환율입니다. 외화 결제, 차입, 환헤지 비용 판단의 가장 기본 축입니다.",
+    },
+    "원/엔": {
+        "stat": "731Y001",
+        "cycle": "D",
+        "keywords": ["엔"],
+        "unit": "원",
+        "description": "엔화 대비 원화 환율입니다. 에너지, 설비, 일본 경쟁업종과 아시아 자금흐름을 볼 때 참고합니다.",
+    },
+    "원/위안": {
+        "stat": "731Y001",
+        "cycle": "D",
+        "keywords": ["위안"],
+        "unit": "원",
+        "description": "위안화 대비 원화 환율입니다. 한국 수출 경기와 중국 경기 민감도를 함께 확인할 때 유용합니다.",
     },
 }
 
@@ -201,19 +252,33 @@ FRED_SERIES = {
         "transform": "level",
         "description": "Henry Hub 천연가스 가격입니다. 지역난방회사 관점에서 에너지 원가 부담을 볼 때 유용합니다.",
     },
-    "글로벌 구리 가격 지수": {
-        "code": "PCOPPUSDM",
-        "unit": "지수",
-        "group": "환율/원자재",
-        "transform": "level",
-        "description": "글로벌 구리 가격입니다. 산업 경기와 제조업 모멘텀을 반영하는 대표 원자재 지표입니다.",
-    },
-    "금 가격": {
-        "code": ["GOLDAMGBD228NLBM", "GOLDPMGBD228NLBM"],
+}
+
+MARKET_PROXY_SERIES = {
+    "비트코인": {
+        "symbol": "BTC-USD",
         "unit": "달러",
-        "group": "환율/원자재",
-        "transform": "level",
-        "description": "런던 금 가격입니다. 안전자산 선호와 실질금리 흐름을 함께 반영합니다.",
+        "description": "글로벌 위험선호와 달러 유동성 심리를 빠르게 반영하는 보조 지표입니다.",
+    },
+    "금": {
+        "symbol": "GC=F",
+        "unit": "달러",
+        "description": "안전자산 선호, 실질금리, 달러 흐름을 함께 보는 방어자산 지표입니다.",
+    },
+    "VIX": {
+        "symbol": "^VIX",
+        "unit": "",
+        "description": "미국 주식시장 변동성 지수입니다. 급등하면 위험회피 심리가 커졌다고 봅니다.",
+    },
+    "S&P500": {
+        "symbol": "^GSPC",
+        "unit": "pt",
+        "description": "미국 대형주 위험자산 흐름을 보는 대표 지수입니다.",
+    },
+    "나스닥": {
+        "symbol": "^IXIC",
+        "unit": "pt",
+        "description": "성장주와 기술주 위험선호를 보는 대표 지수입니다.",
     },
 }
 
@@ -232,7 +297,7 @@ MARKET_GUIDE = {
     ],
     "프로 투자자 관점": [
         "10Y-2Y 역전, 샴의 법칙, 하이일드 스프레드는 위험자산 비중을 줄일 때 보는 핵심 경보입니다.",
-        "구리/금 비율은 글로벌 경기 모멘텀 나침반입니다. 우상향은 경기 회복, 하락 전환은 방어적 포지션 선호로 해석합니다.",
+        "비트코인, 금, VIX는 위험선호와 안전자산 선호가 동시에 어떻게 움직이는지 보는 보조 지표입니다.",
         "히트맵은 지수 상승이 특정 섹터 쏠림인지, 넓은 상승인지 빠르게 확인하는 보조 화면입니다.",
     ],
 }
@@ -242,6 +307,61 @@ def _period_bounds(cycle: str) -> tuple[str, str]:
     if cycle == "D":
         return START_DAY, END_DAY
     return START_MONTH, END_MONTH
+
+
+@st.cache_data(ttl=86400)
+def fetch_ecos_item_rows(stat_code: str) -> list[dict]:
+    if not ECOS_API_KEY:
+        raise ValueError("ECOS_API_KEY가 설정되어 있지 않습니다. Streamlit secrets 또는 환경변수에 추가하세요.")
+
+    rows: list[dict] = []
+    page_size = 1000
+    offset = 1
+
+    while True:
+        url = f"{ECOS_ITEM_BASE}/{offset}/{offset + page_size - 1}/{stat_code}"
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+
+        if "StatisticItemList" not in payload:
+            message = payload.get("RESULT", {}).get("MESSAGE", payload)
+            raise ValueError(f"ECOS 항목 조회 오류 ({stat_code}): {message}")
+
+        block = payload["StatisticItemList"]
+        batch = block.get("row", [])
+        if isinstance(batch, dict):
+            batch = [batch]
+        rows.extend(batch)
+
+        total = int(block.get("list_total_count", len(rows)))
+        if offset + page_size - 1 >= total:
+            break
+        offset += page_size
+
+    return rows
+
+
+def resolve_ecos_item_codes(stat_code: str, keywords: list[str], fallback_items: list[str] | None = None) -> list[str]:
+    normalized_keywords = [keyword.lower().replace(" ", "") for keyword in keywords if keyword]
+    if not normalized_keywords:
+        if fallback_items:
+            return fallback_items
+        raise ValueError(f"{stat_code} 항목 키워드가 없습니다.")
+
+    rows = fetch_ecos_item_rows(stat_code)
+    for row in rows:
+        haystack = " ".join(str(value) for value in row.values() if value is not None)
+        normalized_haystack = haystack.lower().replace(" ", "")
+        if all(keyword in normalized_haystack for keyword in normalized_keywords):
+            for key in ("ITEM_CODE", "ITEM_CODE1", "ITEM_CODE2", "ITEM_CODE3", "ITEM_CODE4"):
+                value = str(row.get(key, "")).strip()
+                if value:
+                    return [value]
+
+    if fallback_items:
+        return fallback_items
+    raise ValueError(f"ECOS {stat_code}에서 항목을 찾지 못했습니다: {', '.join(keywords)}")
 
 
 def fetch_ecos_rows(
@@ -352,7 +472,12 @@ def fetch_domestic_rates() -> pd.DataFrame:
 
     for label, spec in DOMESTIC_SERIES.items():
         try:
-            rows = fetch_ecos_rows(spec["stat"], spec["cycle"], spec["items"])
+            item_codes = spec.get("items") or resolve_ecos_item_codes(
+                spec["stat"],
+                spec.get("keywords", []),
+                spec.get("fallback_items"),
+            )
+            rows = fetch_ecos_rows(spec["stat"], spec["cycle"], item_codes)
             series = rows_to_series(rows, spec["cycle"]).rename(label)
         except Exception as error:
             ECOS_FETCH_ERRORS[label] = str(error)
@@ -382,7 +507,73 @@ def fetch_domestic_rates() -> pd.DataFrame:
         merged["AA- vs 국고채 스프레드"] = merged["회사채 AA- 3년"] - merged["국고채 3년"]
     if {"회사채 BBB- 3년", "회사채 AA- 3년"}.issubset(merged.columns):
         merged["BBB- vs AA- 스프레드"] = merged["회사채 BBB- 3년"] - merged["회사채 AA- 3년"]
+    if {"CP 91일", "CD 91일"}.issubset(merged.columns):
+        merged["CP-CD 스프레드"] = merged["CP 91일"] - merged["CD 91일"]
+    if {"KORIBOR 3개월", "기준금리"}.issubset(merged.columns):
+        merged["KORIBOR-기준금리 스프레드"] = merged["KORIBOR 3개월"] - merged["기준금리"]
+    if "원/달러" in merged.columns:
+        merged["원/달러 1개월 변화율"] = merged["원/달러"].pct_change(20) * 100
+        merged["원/달러 20일 변동성"] = merged["원/달러"].pct_change().rolling(20).std() * (252 ** 0.5) * 100
 
+    return merged.dropna(how="all")
+
+
+def yahoo_chart_to_series(symbol: str) -> pd.Series:
+    params = {
+        "range": "2y",
+        "interval": "1d",
+        "includePrePost": "false",
+        "events": "history",
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(YAHOO_CHART_URL.format(symbol=symbol), params=params, headers=headers, timeout=20)
+    response.raise_for_status()
+    result = response.json().get("chart", {}).get("result", [])
+    if not result:
+        return pd.Series(dtype=float)
+
+    block = result[0]
+    timestamps = block.get("timestamp", [])
+    close = block.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+    if not timestamps or not close:
+        return pd.Series(dtype=float)
+
+    series = pd.Series(close, index=pd.to_datetime(timestamps, unit="s"), dtype="float64")
+    series = series.dropna().sort_index()
+    series.index = series.index.normalize()
+    return series[~series.index.duplicated(keep="last")]
+
+
+def _fetch_one_market_proxy(label_and_spec: tuple[str, dict]) -> tuple[str, pd.Series | None]:
+    label, spec = label_and_spec
+    try:
+        series = yahoo_chart_to_series(spec["symbol"])
+        return label, series.rename(label)
+    except Exception as error:
+        MARKET_PROXY_ERRORS[label] = str(error)
+        return label, None
+
+
+@st.cache_data(ttl=900)
+def fetch_market_proxy_data() -> pd.DataFrame:
+    MARKET_PROXY_ERRORS.clear()
+    frames: list[pd.DataFrame] = []
+    items = list(MARKET_PROXY_SERIES.items())
+    max_workers = min(6, len(items))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_fetch_one_market_proxy, item) for item in items]
+        for future in concurrent.futures.as_completed(futures):
+            label, series = future.result()
+            if series is not None and not series.empty:
+                frames.append(series.to_frame())
+
+    if not frames:
+        return pd.DataFrame()
+
+    merged = pd.concat(frames, axis=1).sort_index().ffill()
+    for name in [col for col in merged.columns if col != "VIX"]:
+        merged[f"{name} 1개월 변화율"] = merged[name].pct_change(20) * 100
     return merged.dropna(how="all")
 
 
@@ -415,10 +606,6 @@ def fetch_fred_macro_data() -> pd.DataFrame:
         return pd.DataFrame()
 
     merged = pd.concat(frames, axis=1).sort_index()
-
-    if {"글로벌 구리 가격 지수", "금 가격"}.issubset(merged.columns):
-        ratio_base = merged[["글로벌 구리 가격 지수", "금 가격"]].sort_index().ffill()
-        merged["구리/금 비율"] = ratio_base["글로벌 구리 가격 지수"] / ratio_base["금 가격"]
 
     return merged.dropna(how="all")
 
@@ -499,44 +686,6 @@ def format_dataframe(frame: pd.DataFrame, date_format: str = "%Y-%m-%d") -> pd.D
     return display_df.round(4).reset_index()
 
 
-def render_ratio_dual_axis_chart(df: pd.DataFrame) -> None:
-    required = ["글로벌 구리 가격 지수", "금 가격", "구리/금 비율"]
-    available = [col for col in required if col in df.columns and not df[col].dropna().empty]
-    if len(available) < 3:
-        missing = [col for col in required if col not in available]
-        st.info(f"구리/금 비율 계산에 필요한 데이터가 부족합니다: {', '.join(missing)}")
-        return
-
-    chart_df = df[required].dropna().tail(180).reset_index(names="date")
-    price_df = chart_df.melt(
-        id_vars="date",
-        value_vars=["글로벌 구리 가격 지수", "금 가격"],
-        var_name="가격 지표",
-        value_name="가격",
-    )
-
-    price_chart = (
-        alt.Chart(price_df)
-        .mark_line()
-        .encode(
-            x=alt.X("date:T", title="date"),
-            y=alt.Y("가격:Q", title="구리/금 가격"),
-            color=alt.Color("가격 지표:N", title="가격 지표"),
-            tooltip=["date:T", "가격 지표:N", alt.Tooltip("가격:Q", format=",.2f")],
-        )
-    )
-    ratio_chart = (
-        alt.Chart(chart_df)
-        .mark_line(color="#111827", strokeWidth=3)
-        .encode(
-            x=alt.X("date:T", title="date"),
-            y=alt.Y("구리/금 비율:Q", title="구리/금 비율"),
-            tooltip=["date:T", alt.Tooltip("구리/금 비율:Q", format=".5f")],
-        )
-    )
-    st.altair_chart(alt.layer(price_chart, ratio_chart).resolve_scale(y="independent"), use_container_width=True)
-
-
 def signal_from_value(value: float | None, warning: float, danger: float, higher_is_risk: bool = True) -> tuple[str, str]:
     if value is None or pd.isna(value):
         return "확인 필요", "gray"
@@ -591,22 +740,22 @@ def render_market_summary(domestic: pd.DataFrame, macro: pd.DataFrame, cross: pd
     render_sahm_rule_warning(macro)
 
     cols = st.columns(6)
-    aa_rate = latest_value(domestic, "회사채 AA- 3년")
+    cp_cd_spread = latest_value(domestic, "CP-CD 스프레드")
     bbb_aa_spread = latest_value(domestic, "BBB- vs AA- 스프레드")
     hy_spread = latest_value(macro, "하이일드 스프레드")
     curve_10y2y = latest_value(macro, "미국채 10년-2년")
     han_us_gap = latest_value(cross, "한-미 기준금리차")
-    copper_gold = latest_value(macro, "구리/금 비율")
+    usdkrw_mom = latest_value(domestic, "원/달러 1개월 변화율")
 
-    aa_signal, aa_color = signal_from_value(aa_rate, 4.5, 5.0)
+    cp_cd_signal, cp_cd_color = signal_from_value(cp_cd_spread, 0.4, 0.8)
     bbb_signal, bbb_color = signal_from_value(bbb_aa_spread, 4.5, 6.0)
     hy_signal, hy_color = signal_from_value(hy_spread, 4.5, 6.0)
     curve_signal, curve_color = signal_from_value(curve_10y2y, 0.0, -0.5, higher_is_risk=False)
     gap_signal, gap_color = signal_from_value(han_us_gap, -1.0, -2.0, higher_is_risk=False)
-    copper_signal, copper_color = signal_from_value(copper_gold, 0.004, 0.0035, higher_is_risk=False)
+    usdkrw_signal, usdkrw_color = signal_from_value(abs(usdkrw_mom) if pd.notna(usdkrw_mom) else float("nan"), 3.0, 6.0)
 
     with cols[0]:
-        render_signal_card("국내 AA- 조달금리", format_value(aa_rate, "%"), aa_signal, "대기업 회사채 발행 부담", aa_color)
+        render_signal_card("CP-CD 스프레드", format_value(cp_cd_spread, "%p"), cp_cd_signal, "기업 단기자금 경색 신호", cp_cd_color)
     with cols[1]:
         render_signal_card("BBB- vs AA-", format_value(bbb_aa_spread, "%p"), bbb_signal, "비우량 자금시장 경색 신호", bbb_color)
     with cols[2]:
@@ -616,7 +765,7 @@ def render_market_summary(domestic: pd.DataFrame, macro: pd.DataFrame, cross: pd
     with cols[4]:
         render_signal_card("한-미 기준금리차", format_value(han_us_gap, "%p"), gap_signal, "환헤지 비용과 달러 조달 압력", gap_color)
     with cols[5]:
-        render_signal_card("구리/금 비율", format_value(copper_gold, "", 4), copper_signal, "경기 모멘텀 나침반", copper_color)
+        render_signal_card("원/달러 1개월", format_value(usdkrw_mom, "%"), usdkrw_signal, "외화 결제와 환헤지 변동성", usdkrw_color)
 
 
 def render_indicator_notes(specs: dict[str, dict], title: str) -> None:
@@ -653,7 +802,11 @@ def render_data_source_diagnostics() -> None:
             st.markdown("**FRED 수집 실패**")
             for label, error in FRED_FETCH_ERRORS.items():
                 st.write(f"{label}: {error}")
-        if not ECOS_FETCH_ERRORS and not FRED_FETCH_ERRORS:
+        if MARKET_PROXY_ERRORS:
+            st.markdown("**시장 보조지표 수집 실패**")
+            for label, error in MARKET_PROXY_ERRORS.items():
+                st.write(f"{label}: {error}")
+        if not ECOS_FETCH_ERRORS and not FRED_FETCH_ERRORS and not MARKET_PROXY_ERRORS:
             st.caption("현재 세션에서 기록된 API 오류가 없습니다.")
 
 
@@ -706,18 +859,12 @@ def render_tradingview_widgets(lightweight: bool = True) -> None:
 
     if lightweight:
         st.info("모바일/공유용 경량 모드에서는 외부 위젯을 앱 안에 직접 띄우지 않습니다. 아래 버튼으로 새 창에서 여는 편이 안정적입니다.")
-        link_cols = st.columns(3)
-        link_cols[0].link_button("TradingView 히트맵 새 창", "https://www.tradingview.com/heatmap/stock/")
-        link_cols[1].link_button("Finviz S&P500 맵", "https://finviz.com/map.ashx")
-        link_cols[2].link_button("TradingView 시장", "https://www.tradingview.com/markets/")
+        st.link_button("TradingView 히트맵 새 창", "https://www.tradingview.com/heatmap/stock/")
         return
 
     if not st.checkbox("TradingView 외부 위젯 불러오기", value=False):
         st.info("외부 위젯은 브라우저 렌더링 부담이 커서 기본으로 꺼두었습니다. 필요할 때만 체크해서 불러오세요.")
-        link_cols = st.columns(3)
-        link_cols[0].link_button("TradingView 히트맵 새 창", "https://www.tradingview.com/heatmap/stock/")
-        link_cols[1].link_button("Finviz S&P500 맵", "https://finviz.com/map.ashx")
-        link_cols[2].link_button("TradingView 시장", "https://www.tradingview.com/markets/")
+        st.link_button("TradingView 히트맵 새 창", "https://www.tradingview.com/heatmap/stock/")
         return
 
     st.markdown("#### 미국 주식 히트맵")
@@ -740,63 +887,6 @@ def render_tradingview_widgets(lightweight: bool = True) -> None:
         760,
     )
 
-    forex_col, overview_col = st.columns(2)
-    with forex_col:
-        st.markdown("#### 환율 히트맵")
-        tradingview_widget(
-            "embed-widget-forex-heat-map.js",
-            {
-                "currencies": ["USD", "EUR", "JPY", "CNY", "KRW", "GBP", "AUD", "CAD", "CHF"],
-                "isTransparent": False,
-                "colorTheme": "light",
-                "locale": "kr",
-            },
-            430,
-        )
-    with overview_col:
-        st.markdown("#### 시장 개요")
-        tradingview_widget(
-            "embed-widget-market-overview.js",
-            {
-                "colorTheme": "light",
-                "dateRange": "12M",
-                "showChart": True,
-                "locale": "kr",
-                "largeChartUrl": "",
-                "isTransparent": False,
-                "showSymbolLogo": True,
-                "showFloatingTooltip": False,
-                "tabs": [
-                    {
-                        "title": "지수",
-                        "symbols": [
-                            {"s": "FOREXCOM:SPXUSD", "d": "S&P 500"},
-                            {"s": "NASDAQ:NDX", "d": "Nasdaq 100"},
-                            {"s": "TVC:US10Y", "d": "미국 10년"},
-                            {"s": "TVC:DXY", "d": "달러지수"},
-                        ],
-                    },
-                    {
-                        "title": "원자재",
-                        "symbols": [
-                            {"s": "NYMEX:CL1!", "d": "WTI"},
-                            {"s": "NYMEX:NG1!", "d": "천연가스"},
-                            {"s": "TVC:GOLD", "d": "금"},
-                        ],
-                    },
-                    {
-                        "title": "환율",
-                        "symbols": [
-                            {"s": "FX_IDC:USDKRW", "d": "달러/원"},
-                            {"s": "FX_IDC:USDJPY", "d": "달러/엔"},
-                            {"s": "FX_IDC:USDCNH", "d": "달러/위안"},
-                        ],
-                    },
-                ],
-            },
-            430,
-        )
-
 
 def render_domestic_section(df: pd.DataFrame, lightweight: bool = True) -> None:
     st.markdown("### 국내 자금시장")
@@ -806,56 +896,96 @@ def render_domestic_section(df: pd.DataFrame, lightweight: bool = True) -> None:
         st.warning("국내 금리 데이터를 불러오지 못했습니다. 네트워크 권한 또는 ECOS 응답을 확인하세요.")
         return
 
-    metric_cols = ["기준금리", "국고채 3년", "국고채 10년", "회사채 AA- 3년", "회사채 BBB- 3년", "KORIBOR 3개월"]
+    metric_cols = ["기준금리", "국고채 3년", "회사채 AA- 3년", "CD 91일", "CP 91일", "원/달러"]
     render_metric_row(df, DOMESTIC_SERIES, metric_cols)
+
+    min_date = df.index.min().date()
+    max_date = df.index.max().date()
+    default_years = 2 if lightweight else 3
+    default_start = max(min_date, (pd.Timestamp(max_date) - pd.DateOffset(years=default_years)).date())
+    if lightweight:
+        start_date, end_date = default_start, max_date
+        st.caption("경량 모드: 국내 차트는 최근 2년 기준")
+    else:
+        start_date, end_date = st.date_input(
+            "국내 자금시장 조회 기간",
+            value=(default_start, max_date),
+            min_value=min_date,
+            max_value=max_date,
+        )
+    filtered = df.loc[pd.to_datetime(start_date) : pd.to_datetime(end_date)]
 
     chart_col, spread_col = st.columns([2, 1])
     with chart_col:
-        st.markdown("#### 일간 금리 추이")
-        rate_cols = [col for col in metric_cols if col in df.columns]
-        min_date = df.index.min().date()
-        max_date = df.index.max().date()
-        default_years = 2 if lightweight else 3
-        default_start = max(min_date, (pd.Timestamp(max_date) - pd.DateOffset(years=default_years)).date())
-        if lightweight:
-            start_date, end_date = default_start, max_date
-            st.caption("경량 모드: 최근 2년 기준")
+        st.markdown("#### 국채/회사채 금리")
+        rate_cols = [col for col in ["기준금리", "국고채 3년", "국고채 10년", "회사채 AA- 3년", "회사채 BBB- 3년"] if col in filtered.columns]
+        if rate_cols:
+            st.line_chart(filtered[rate_cols], width="stretch")
         else:
-            start_date, end_date = st.date_input(
-                "국내 금리 조회 기간",
-                value=(default_start, max_date),
-                min_value=min_date,
-                max_value=max_date,
-            )
-        filtered = df.loc[pd.to_datetime(start_date) : pd.to_datetime(end_date)]
-        st.line_chart(filtered[rate_cols], use_container_width=True)
+            st.info("표시할 국내 금리 데이터가 없습니다.")
 
     with spread_col:
         st.markdown("#### 조달 스프레드")
-        spread_cols = [col for col in ["AA- vs 국고채 스프레드", "BBB- vs AA- 스프레드"] if col in df.columns]
+        spread_cols = [col for col in ["AA- vs 국고채 스프레드", "BBB- vs AA- 스프레드"] if col in filtered.columns]
         if spread_cols:
-            if lightweight:
-                spread_start, spread_end = max(df.index.min().date(), (pd.Timestamp(df.index.max().date()) - pd.DateOffset(years=3)).date()), df.index.max().date()
-                st.caption("경량 모드: 최근 3년 기준")
-            else:
-                spread_start, spread_end = st.date_input(
-                    "스프레드 조회 기간",
-                    value=(df.index.min().date(), df.index.max().date()),
-                    min_value=df.index.min().date(),
-                    max_value=df.index.max().date(),
-                    key="spread_date_range",
-                )
-            spread_df = df.loc[pd.to_datetime(spread_start) : pd.to_datetime(spread_end), spread_cols]
-            st.line_chart(spread_df, use_container_width=True)
+            st.line_chart(filtered[spread_cols], width="stretch")
         st.markdown(
             "AA- 스프레드는 대기업 조달 여건, BBB- vs AA- 스프레드는 비우량 기업의 자금 가뭄과 부도위험 선행 신호로 봅니다."
         )
 
+    money_col, fx_col = st.columns(2)
+    with money_col:
+        st.markdown("#### 단기자금시장")
+        money_cols = [
+            col
+            for col in ["CD 91일", "CP 91일", "KORIBOR 1개월", "KORIBOR 3개월", "KORIBOR 6개월"]
+            if col in filtered.columns
+        ]
+        if money_cols:
+            st.line_chart(filtered[money_cols], width="stretch")
+        else:
+            st.info("CD, CP, KORIBOR 등 단기자금시장 데이터가 아직 연결되지 않았습니다.")
+
+        short_spread_cols = [col for col in ["CP-CD 스프레드", "KORIBOR-기준금리 스프레드"] if col in filtered.columns]
+        if short_spread_cols and not lightweight:
+            st.line_chart(filtered[short_spread_cols], width="stretch")
+        st.caption("CP-CD 스프레드가 벌어지면 기업 단기 차입 부담이 CD보다 빠르게 높아진다는 뜻입니다.")
+
+    with fx_col:
+        st.markdown("#### 외환/환헤지")
+        fx_cols = [col for col in ["원/달러", "원/엔", "원/위안"] if col in filtered.columns]
+        if fx_cols:
+            st.line_chart(filtered[fx_cols], width="stretch")
+        else:
+            st.info("환율 데이터가 아직 연결되지 않았습니다.")
+
+        fx_risk_cols = [col for col in ["원/달러 1개월 변화율", "원/달러 20일 변동성"] if col in filtered.columns]
+        if fx_risk_cols and not lightweight:
+            st.line_chart(filtered[fx_risk_cols], width="stretch")
+        st.caption("원/달러 상승은 외화 결제 부담과 환헤지 비용 점검 필요성을 키웁니다.")
+
     if not lightweight:
         with st.expander("최근 일별 국내 금리 데이터", expanded=False):
-            display_cols = [col for col in metric_cols + ["AA- vs 국고채 스프레드", "BBB- vs AA- 스프레드"] if col in df.columns]
+            display_cols = [
+                col
+                for col in metric_cols
+                + [
+                    "KORIBOR 1개월",
+                    "KORIBOR 3개월",
+                    "KORIBOR 6개월",
+                    "원/엔",
+                    "원/위안",
+                    "AA- vs 국고채 스프레드",
+                    "BBB- vs AA- 스프레드",
+                    "CP-CD 스프레드",
+                    "KORIBOR-기준금리 스프레드",
+                    "원/달러 1개월 변화율",
+                    "원/달러 20일 변동성",
+                ]
+                if col in df.columns
+            ]
             recent_df = format_dataframe(df[display_cols].tail(120).sort_index(ascending=False))
-            st.dataframe(recent_df, use_container_width=True, hide_index=True)
+            st.dataframe(recent_df, width="stretch", hide_index=True)
 
     render_indicator_notes(DOMESTIC_SERIES, "국내 지표 설명")
 
@@ -869,7 +999,7 @@ def render_cross_market_section(cross: pd.DataFrame) -> None:
         return
 
     cols = [col for col in ["한국 기준금리", "미국 기준금리", "한-미 기준금리차"] if col in cross.columns]
-    st.line_chart(cross[cols], use_container_width=True)
+    st.line_chart(cross[cols], width="stretch")
     latest_gap = cross["한-미 기준금리차"].dropna().iloc[-1]
     st.markdown(
         f"현재 한-미 기준금리차는 **{latest_gap:.2f}%p**입니다. "
@@ -885,18 +1015,14 @@ def render_macro_section(df: pd.DataFrame, lightweight: bool = True) -> None:
         st.warning("미국/글로벌 매크로 데이터를 불러오지 못했습니다. 네트워크 권한 또는 FRED 응답을 확인하세요.")
         return
 
-    important = ["SOFR", "연준 지급준비금", "하이일드 스프레드", "미국채 10년-2년", "실업률", "구리/금 비율"]
-    render_metric_row(df, FRED_SERIES | {"구리/금 비율": {"unit": ""}}, [name for name in important if name in df.columns])
+    important = ["SOFR", "연준 지급준비금", "하이일드 스프레드", "미국채 10년-2년", "실업률", "무역가중 달러지수"]
+    render_metric_row(df, FRED_SERIES, [name for name in important if name in df.columns])
 
     groups = {
         "유동성": [name for name, spec in FRED_SERIES.items() if spec["group"] == "유동성"],
         "채권/신용": [name for name, spec in FRED_SERIES.items() if spec["group"] == "채권/신용"],
         "경기/물가": [name for name, spec in FRED_SERIES.items() if spec["group"] == "경기/물가"],
-        "환율/원자재": [
-            name
-            for name, spec in FRED_SERIES.items()
-            if spec["group"] == "환율/원자재" and name not in {"글로벌 구리 가격 지수", "금 가격"}
-        ],
+        "환율/원자재": [name for name, spec in FRED_SERIES.items() if spec["group"] == "환율/원자재"],
     }
     if lightweight:
         groups = {
@@ -912,28 +1038,55 @@ def render_macro_section(df: pd.DataFrame, lightweight: bool = True) -> None:
                 st.markdown(f"#### {title}")
                 visible_cols = [name for name in names if name in df.columns]
                 if visible_cols:
-                    st.line_chart(df[visible_cols], use_container_width=True)
+                    st.line_chart(df[visible_cols], width="stretch")
 
-    if "구리/금 비율" in df.columns:
-        st.markdown("#### 구리/금 비율")
-        render_ratio_dual_axis_chart(df)
-        st.info("구리/금 비율이 우상향하면 경기 회복과 위험자산 선호, 꺾이면 경기 둔화와 채권 선호 신호로 해석할 수 있습니다.")
-    else:
-        raw_cols = [col for col in ["글로벌 구리 가격 지수", "금 가격"] if col in df.columns]
-        if raw_cols:
-            st.markdown("#### 구리/금 비율")
-            st.info(f"구리/금 비율 계산 전 단계 데이터만 있습니다: {', '.join(raw_cols)}. 금 또는 구리 FRED 시리즈 응답이 비어 있으면 비율을 만들 수 없습니다.")
-        if FRED_FETCH_ERRORS:
-            with st.expander("FRED 수집 실패 진단", expanded=False):
-                for label, error in FRED_FETCH_ERRORS.items():
-                    st.write(f"{label}: {error}")
+    if FRED_FETCH_ERRORS:
+        with st.expander("FRED 수집 실패 진단", expanded=False):
+            for label, error in FRED_FETCH_ERRORS.items():
+                st.write(f"{label}: {error}")
 
     if not lightweight:
         with st.expander("월별 미국/글로벌 매크로 데이터", expanded=False):
             display_df = format_dataframe(df, "%Y-%m")
-            st.dataframe(display_df.sort_values("date", ascending=False), use_container_width=True, hide_index=True)
+            st.dataframe(display_df.sort_values("date", ascending=False), width="stretch", hide_index=True)
 
     render_indicator_notes(FRED_SERIES, "미국/글로벌 지표 설명")
+
+
+def render_market_proxy_section(df: pd.DataFrame, lightweight: bool = True) -> None:
+    st.markdown("### 시장 보조지표")
+    st.caption("무료 Yahoo Finance 가격 데이터 | 코인, 금, 변동성, 미국 주가지수")
+
+    if df.empty:
+        st.info("시장 보조지표를 불러오지 못했습니다. 이 섹션은 보조 데이터라 메인 판단에는 영향을 주지 않습니다.")
+        if MARKET_PROXY_ERRORS:
+            with st.expander("시장 보조지표 수집 실패 진단", expanded=False):
+                for label, error in MARKET_PROXY_ERRORS.items():
+                    st.write(f"{label}: {error}")
+        return
+
+    metric_cols = [name for name in ["비트코인", "금", "VIX", "S&P500", "나스닥"] if name in df.columns]
+    render_metric_row(df, MARKET_PROXY_SERIES, metric_cols)
+
+    visible = df.tail(180 if lightweight else 360)
+    price_cols = [col for col in ["비트코인", "금", "VIX"] if col in visible.columns]
+    equity_cols = [col for col in ["S&P500", "나스닥"] if col in visible.columns]
+    change_cols = [col for col in ["비트코인 1개월 변화율", "금 1개월 변화율", "S&P500 1개월 변화율", "나스닥 1개월 변화율"] if col in visible.columns]
+
+    price_col, change_col = st.columns(2)
+    with price_col:
+        st.markdown("#### 위험선호/안전자산")
+        if price_cols:
+            st.line_chart(visible[price_cols], width="stretch")
+        if equity_cols and not lightweight:
+            st.line_chart(visible[equity_cols], width="stretch")
+    with change_col:
+        st.markdown("#### 1개월 변화율")
+        if change_cols:
+            st.line_chart(visible[change_cols], width="stretch")
+        st.caption("비트코인과 주식이 같이 강하고 VIX가 낮으면 위험선호, 금과 VIX가 같이 강하면 방어 심리로 봅니다.")
+
+    render_indicator_notes(MARKET_PROXY_SERIES, "시장 보조지표 설명")
 
 
 def render_news_card(article: dict) -> None:
@@ -959,6 +1112,7 @@ def render_dashboard_tab() -> None:
 
     domestic = fetch_domestic_rates()
     macro = fetch_fred_macro_data()
+    market_proxy = fetch_market_proxy_data()
     cross = build_cross_market_indicators(domestic, macro)
 
     render_market_guide()
@@ -970,6 +1124,8 @@ def render_dashboard_tab() -> None:
     render_cross_market_section(cross)
     st.divider()
     render_macro_section(macro, lightweight=lightweight)
+    st.divider()
+    render_market_proxy_section(market_proxy, lightweight=lightweight)
     st.divider()
     render_tradingview_widgets(lightweight=lightweight)
 
@@ -1013,10 +1169,9 @@ def render_news_calendar_tab() -> None:
         st.info("경제 캘린더는 외부 위젯이라 필요할 때만 불러오도록 꺼두었습니다.")
 
     st.markdown("### 외부 자료 바로가기")
-    link_cols = st.columns(3)
+    link_cols = st.columns(2)
     link_cols[0].link_button("TradingView 히트맵", "https://www.tradingview.com/heatmap/stock/")
-    link_cols[1].link_button("Finviz S&P500 맵", "https://finviz.com/map.ashx")
-    link_cols[2].link_button("FRED 데이터", "https://fred.stlouisfed.org/")
+    link_cols[1].link_button("FRED 데이터", "https://fred.stlouisfed.org/")
 
 
 def main() -> None:
