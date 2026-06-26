@@ -27,6 +27,7 @@ FRED_API_KEY = get_config_value("FRED_API_KEY")
 ECOS_BASE = f"https://ecos.bok.or.kr/api/StatisticSearch/{ECOS_API_KEY}/json/kr"
 FRED_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
 FRED_FETCH_ERRORS: dict[str, str] = {}
+ECOS_FETCH_ERRORS: dict[str, str] = {}
 
 START_MONTH = "201501"
 START_DAY = "20150101"
@@ -345,6 +346,7 @@ def transform_fred_series(series: pd.Series, transform: str) -> pd.Series:
 
 @st.cache_data(ttl=3600)
 def fetch_domestic_rates() -> pd.DataFrame:
+    ECOS_FETCH_ERRORS.clear()
     daily_frames: list[pd.DataFrame] = []
     monthly_frames: list[pd.DataFrame] = []
 
@@ -352,7 +354,8 @@ def fetch_domestic_rates() -> pd.DataFrame:
         try:
             rows = fetch_ecos_rows(spec["stat"], spec["cycle"], spec["items"])
             series = rows_to_series(rows, spec["cycle"]).rename(label)
-        except Exception:
+        except Exception as error:
+            ECOS_FETCH_ERRORS[label] = str(error)
             continue
 
         if spec["cycle"] == "D":
@@ -632,6 +635,28 @@ def render_market_guide() -> None:
                     st.markdown(f"- {note}")
 
 
+def render_data_source_diagnostics() -> None:
+    with st.expander("데이터 연결 진단", expanded=False):
+        st.write(
+            {
+                "ECOS_API_KEY loaded": bool(ECOS_API_KEY),
+                "FRED_API_KEY loaded": bool(FRED_API_KEY),
+                "ECOS key length": len(ECOS_API_KEY or ""),
+                "FRED key length": len(FRED_API_KEY or ""),
+            }
+        )
+        if ECOS_FETCH_ERRORS:
+            st.markdown("**ECOS 수집 실패**")
+            for label, error in ECOS_FETCH_ERRORS.items():
+                st.write(f"{label}: {error}")
+        if FRED_FETCH_ERRORS:
+            st.markdown("**FRED 수집 실패**")
+            for label, error in FRED_FETCH_ERRORS.items():
+                st.write(f"{label}: {error}")
+        if not ECOS_FETCH_ERRORS and not FRED_FETCH_ERRORS:
+            st.caption("현재 세션에서 기록된 API 오류가 없습니다.")
+
+
 def render_metric_row(frame: pd.DataFrame, specs: dict[str, dict], columns: list[str]) -> None:
     visible = [name for name in columns if name in frame.columns]
     if not visible:
@@ -675,9 +700,17 @@ def tradingview_widget(script_name: str, config: dict, height: int) -> None:
     components.html(html_block, height=height + 40, scrolling=False)
 
 
-def render_tradingview_widgets() -> None:
+def render_tradingview_widgets(lightweight: bool = True) -> None:
     st.markdown("### 글로벌 시장 히트맵")
     st.caption("무료 공식 TradingView 위젯입니다. 데이터는 외부 위젯에서 직접 제공되며 앱 내부 계산에는 쓰지 않습니다.")
+
+    if lightweight:
+        st.info("모바일/공유용 경량 모드에서는 외부 위젯을 앱 안에 직접 띄우지 않습니다. 아래 버튼으로 새 창에서 여는 편이 안정적입니다.")
+        link_cols = st.columns(3)
+        link_cols[0].link_button("TradingView 히트맵 새 창", "https://www.tradingview.com/heatmap/stock/")
+        link_cols[1].link_button("Finviz S&P500 맵", "https://finviz.com/map.ashx")
+        link_cols[2].link_button("TradingView 시장", "https://www.tradingview.com/markets/")
+        return
 
     if not st.checkbox("TradingView 외부 위젯 불러오기", value=False):
         st.info("외부 위젯은 브라우저 렌더링 부담이 커서 기본으로 꺼두었습니다. 필요할 때만 체크해서 불러오세요.")
@@ -765,7 +798,7 @@ def render_tradingview_widgets() -> None:
         )
 
 
-def render_domestic_section(df: pd.DataFrame) -> None:
+def render_domestic_section(df: pd.DataFrame, lightweight: bool = True) -> None:
     st.markdown("### 국내 자금시장")
     st.caption(f"한국은행 ECOS | {START_DAY[:4]}년 이후 | 시장금리는 일간 기준")
 
@@ -782,13 +815,18 @@ def render_domestic_section(df: pd.DataFrame) -> None:
         rate_cols = [col for col in metric_cols if col in df.columns]
         min_date = df.index.min().date()
         max_date = df.index.max().date()
-        default_start = max(min_date, (pd.Timestamp(max_date) - pd.DateOffset(years=3)).date())
-        start_date, end_date = st.date_input(
-            "국내 금리 조회 기간",
-            value=(default_start, max_date),
-            min_value=min_date,
-            max_value=max_date,
-        )
+        default_years = 2 if lightweight else 3
+        default_start = max(min_date, (pd.Timestamp(max_date) - pd.DateOffset(years=default_years)).date())
+        if lightweight:
+            start_date, end_date = default_start, max_date
+            st.caption("경량 모드: 최근 2년 기준")
+        else:
+            start_date, end_date = st.date_input(
+                "국내 금리 조회 기간",
+                value=(default_start, max_date),
+                min_value=min_date,
+                max_value=max_date,
+            )
         filtered = df.loc[pd.to_datetime(start_date) : pd.to_datetime(end_date)]
         st.line_chart(filtered[rate_cols], use_container_width=True)
 
@@ -796,23 +834,28 @@ def render_domestic_section(df: pd.DataFrame) -> None:
         st.markdown("#### 조달 스프레드")
         spread_cols = [col for col in ["AA- vs 국고채 스프레드", "BBB- vs AA- 스프레드"] if col in df.columns]
         if spread_cols:
-            spread_start, spread_end = st.date_input(
-                "스프레드 조회 기간",
-                value=(df.index.min().date(), df.index.max().date()),
-                min_value=df.index.min().date(),
-                max_value=df.index.max().date(),
-                key="spread_date_range",
-            )
+            if lightweight:
+                spread_start, spread_end = max(df.index.min().date(), (pd.Timestamp(df.index.max().date()) - pd.DateOffset(years=3)).date()), df.index.max().date()
+                st.caption("경량 모드: 최근 3년 기준")
+            else:
+                spread_start, spread_end = st.date_input(
+                    "스프레드 조회 기간",
+                    value=(df.index.min().date(), df.index.max().date()),
+                    min_value=df.index.min().date(),
+                    max_value=df.index.max().date(),
+                    key="spread_date_range",
+                )
             spread_df = df.loc[pd.to_datetime(spread_start) : pd.to_datetime(spread_end), spread_cols]
             st.line_chart(spread_df, use_container_width=True)
         st.markdown(
             "AA- 스프레드는 대기업 조달 여건, BBB- vs AA- 스프레드는 비우량 기업의 자금 가뭄과 부도위험 선행 신호로 봅니다."
         )
 
-    with st.expander("최근 일별 국내 금리 데이터", expanded=False):
-        display_cols = [col for col in metric_cols + ["AA- vs 국고채 스프레드", "BBB- vs AA- 스프레드"] if col in df.columns]
-        recent_df = format_dataframe(df[display_cols].tail(120).sort_index(ascending=False))
-        st.dataframe(recent_df, use_container_width=True, hide_index=True)
+    if not lightweight:
+        with st.expander("최근 일별 국내 금리 데이터", expanded=False):
+            display_cols = [col for col in metric_cols + ["AA- vs 국고채 스프레드", "BBB- vs AA- 스프레드"] if col in df.columns]
+            recent_df = format_dataframe(df[display_cols].tail(120).sort_index(ascending=False))
+            st.dataframe(recent_df, use_container_width=True, hide_index=True)
 
     render_indicator_notes(DOMESTIC_SERIES, "국내 지표 설명")
 
@@ -834,7 +877,7 @@ def render_cross_market_section(cross: pd.DataFrame) -> None:
     )
 
 
-def render_macro_section(df: pd.DataFrame) -> None:
+def render_macro_section(df: pd.DataFrame, lightweight: bool = True) -> None:
     st.markdown("### 미국/글로벌 매크로")
     st.caption("FRED | 병렬 호출 | 유동성, 채권/신용, 경기/물가, 환율/원자재")
 
@@ -855,6 +898,12 @@ def render_macro_section(df: pd.DataFrame) -> None:
             if spec["group"] == "환율/원자재" and name not in {"글로벌 구리 가격 지수", "금 가격"}
         ],
     }
+    if lightweight:
+        groups = {
+            "유동성": [name for name in ["역레포 잔고", "재무부 일반계정", "연준 지급준비금", "SOFR"] if name in df.columns],
+            "채권/신용": [name for name in ["미국채 10년-2년", "하이일드 스프레드", "미국 10년 실질금리"] if name in df.columns],
+            "환율/원자재": [name for name in ["무역가중 달러지수", "WTI", "천연가스"] if name in df.columns],
+        }
 
     for row_start in range(0, len(groups), 2):
         cols = st.columns(2)
@@ -879,9 +928,10 @@ def render_macro_section(df: pd.DataFrame) -> None:
                 for label, error in FRED_FETCH_ERRORS.items():
                     st.write(f"{label}: {error}")
 
-    with st.expander("월별 미국/글로벌 매크로 데이터", expanded=False):
-        display_df = format_dataframe(df, "%Y-%m")
-        st.dataframe(display_df.sort_values("date", ascending=False), use_container_width=True, hide_index=True)
+    if not lightweight:
+        with st.expander("월별 미국/글로벌 매크로 데이터", expanded=False):
+            display_df = format_dataframe(df, "%Y-%m")
+            st.dataframe(display_df.sort_values("date", ascending=False), use_container_width=True, hide_index=True)
 
     render_indicator_notes(FRED_SERIES, "미국/글로벌 지표 설명")
 
@@ -903,20 +953,25 @@ def render_news_card(article: dict) -> None:
 
 
 def render_dashboard_tab() -> None:
+    lightweight = st.sidebar.toggle("모바일/공유용 경량 모드", value=True)
+    if lightweight:
+        st.caption("경량 모드가 켜져 있어 외부 위젯, 큰 표, 일부 장기 차트 렌더링을 줄입니다.")
+
     domestic = fetch_domestic_rates()
     macro = fetch_fred_macro_data()
     cross = build_cross_market_indicators(domestic, macro)
 
     render_market_guide()
+    render_data_source_diagnostics()
     render_market_summary(domestic, macro, cross)
     st.divider()
-    render_domestic_section(domestic)
+    render_domestic_section(domestic, lightweight=lightweight)
     st.divider()
     render_cross_market_section(cross)
     st.divider()
-    render_macro_section(macro)
+    render_macro_section(macro, lightweight=lightweight)
     st.divider()
-    render_tradingview_widgets()
+    render_tradingview_widgets(lightweight=lightweight)
 
 
 def render_news_calendar_tab() -> None:
