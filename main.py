@@ -65,7 +65,7 @@ DOMESTIC_SERIES = {
         "cycle": "D",
         "items": ["010300000"],
         "unit": "%",
-        "description": "우량 회사채 조달금리입니다. 대기업 자금조달 부담을 보는 핵심 지표입니다.",
+        "description": "우량 회사채 조달금리입니다. 기업 자금조달 부담을 보는 핵심 지표입니다.",
     },
     "회사채 BBB- 3년": {
         "stat": "817Y002",
@@ -224,12 +224,47 @@ FRED_SERIES = {
         "transform": "level",
         "description": "미국 소비와 경기 사이클의 핵심 지표입니다. 최근 1년 저점 대비 0.5%p 이상 오르면 샴의 법칙 경고로 봅니다.",
     },
+    "비농업 고용 증감": {
+        "code": "PAYEMS",
+        "unit": "천 명",
+        "group": "경기/물가",
+        "transform": "diff",
+        "description": "미국 비농업 부문 취업자 수의 전월 대비 증감입니다. 고용이 유지되는지 보는 실업률의 짝 지표입니다.",
+    },
+    "CPI": {
+        "code": "CPIAUCSL",
+        "unit": "YoY %",
+        "group": "경기/물가",
+        "transform": "yoy",
+        "description": "미국 소비자물가 상승률입니다. 연준의 금리 경로를 좌우하는 핵심 물가 지표입니다.",
+    },
+    "Core CPI": {
+        "code": "CPILFESL",
+        "unit": "YoY %",
+        "group": "경기/물가",
+        "transform": "yoy",
+        "description": "식료품과 에너지를 제외한 근원 소비자물가입니다. 추세적인 물가 압력을 볼 때 중요합니다.",
+    },
     "Core PCE": {
         "code": "PCEPILFE",
         "unit": "YoY %",
         "group": "경기/물가",
         "transform": "yoy",
         "description": "연준이 중시하는 근원 개인소비지출 물가입니다. 통화정책의 긴축 또는 완화 여지를 판단할 때 봅니다.",
+    },
+    "소매판매": {
+        "code": "RSAFS",
+        "unit": "MoM %",
+        "group": "경기/물가",
+        "transform": "mom",
+        "description": "미국 소매판매의 전월 대비 변화율입니다. 미국 소비 모멘텀이 살아 있는지 확인하는 실물 지표입니다.",
+    },
+    "ISM 제조업": {
+        "code": "NAPM",
+        "unit": "",
+        "group": "경기/물가",
+        "transform": "level",
+        "description": "ISM 제조업 구매관리자지수입니다. 50 이상은 확장, 50 미만은 위축으로 해석합니다.",
     },
     "무역가중 달러지수": {
         "code": "DTWEXBGS",
@@ -461,6 +496,10 @@ def fred_to_monthly_series(series_id: str | list[str]) -> pd.Series:
 def transform_fred_series(series: pd.Series, transform: str) -> pd.Series:
     if transform == "yoy":
         return series.pct_change(12) * 100
+    if transform == "mom":
+        return series.pct_change() * 100
+    if transform == "diff":
+        return series.diff()
     return series
 
 
@@ -520,7 +559,7 @@ def fetch_domestic_rates() -> pd.DataFrame:
 
 def yahoo_chart_to_series(symbol: str) -> pd.Series:
     params = {
-        "range": "2y",
+        "range": "10y",
         "interval": "1d",
         "includePrePost": "false",
         "events": "history",
@@ -606,6 +645,11 @@ def fetch_fred_macro_data() -> pd.DataFrame:
         return pd.DataFrame()
 
     merged = pd.concat(frames, axis=1).sort_index()
+    if "실업률" in merged.columns:
+        unemployment = merged["실업률"].dropna()
+        unemployment_3m = unemployment.rolling(3).mean()
+        trailing_low = unemployment_3m.rolling(12, min_periods=3).min()
+        merged["샴룰 갭"] = unemployment_3m - trailing_low
 
     return merged.dropna(how="all")
 
@@ -686,6 +730,15 @@ def format_dataframe(frame: pd.DataFrame, date_format: str = "%Y-%m-%d") -> pd.D
     return display_df.round(4).reset_index()
 
 
+def normalize_to_100(frame: pd.DataFrame) -> pd.DataFrame:
+    clean = frame.dropna(how="all").ffill()
+    if clean.empty:
+        return clean
+    base = clean.apply(lambda series: series.dropna().iloc[0] if not series.dropna().empty else float("nan"))
+    normalized = clean.divide(base).multiply(100)
+    return normalized.dropna(how="all")
+
+
 def signal_from_value(value: float | None, warning: float, danger: float, higher_is_risk: bool = True) -> tuple[str, str]:
     if value is None or pd.isna(value):
         return "확인 필요", "gray"
@@ -717,17 +770,10 @@ def render_signal_card(title: str, value: str, signal: str, note: str, color: st
 
 
 def render_sahm_rule_warning(df: pd.DataFrame) -> None:
-    if "실업률" in df.columns:
-        unemployment = df["실업률"].dropna()
-        if len(unemployment) >= 12:
-            latest = unemployment.iloc[-1]
-            trailing_low = unemployment.tail(12).min()
-            gap = latest - trailing_low
-            if gap >= 0.5:
-                st.error(
-                    "샴의 법칙 경기침체 경고: "
-                    f"현재 실업률이 최근 12개월 최저치보다 {gap:.2f}%p 높습니다."
-                )
+    if "샴룰 갭" in df.columns:
+        sahm_gap = df["샴룰 갭"].dropna()
+        if not sahm_gap.empty and sahm_gap.iloc[-1] >= 0.5:
+            st.error(f"샴의 법칙 경기침체 경고: 샴룰 갭이 {sahm_gap.iloc[-1]:.2f}%p로 0.5%p 기준을 넘었습니다.")
 
     if "미국채 10년-2년" in df.columns:
         curve = df["미국채 10년-2년"].dropna()
@@ -930,7 +976,7 @@ def render_domestic_section(df: pd.DataFrame, lightweight: bool = True) -> None:
         if spread_cols:
             st.line_chart(filtered[spread_cols], width="stretch")
         st.markdown(
-            "AA- 스프레드는 대기업 조달 여건, BBB- vs AA- 스프레드는 비우량 기업의 자금 가뭄과 부도위험 선행 신호로 봅니다."
+            "AA- 스프레드는 우량기업 조달 여건, BBB- vs AA- 스프레드는 비우량 기업의 자금 가뭄과 부도위험 선행 신호로 봅니다."
         )
 
     money_col, fx_col = st.columns(2)
@@ -1007,6 +1053,26 @@ def render_cross_market_section(cross: pd.DataFrame) -> None:
     )
 
 
+def render_macro_signal_cards(df: pd.DataFrame) -> None:
+    st.markdown("#### 미국 매크로 핵심 신호")
+
+    sahm_gap = latest_value(df, "샴룰 갭")
+    core_cpi = latest_value(df, "Core CPI")
+    ism = latest_value(df, "ISM 제조업")
+
+    sahm_signal, sahm_color = signal_from_value(sahm_gap, 0.3, 0.5)
+    cpi_signal, cpi_color = signal_from_value(core_cpi, 3.0, 4.0)
+    ism_signal, ism_color = signal_from_value(ism, 50.0, 47.0, higher_is_risk=False)
+
+    cols = st.columns(3)
+    with cols[0]:
+        render_signal_card("샴의 법칙", format_value(sahm_gap, "%p"), sahm_signal, "0.5%p 이상이면 침체 경고", sahm_color)
+    with cols[1]:
+        render_signal_card("Core CPI", format_value(core_cpi, "%"), cpi_signal, "물가가 높을수록 금리 인하 여지 축소", cpi_color)
+    with cols[2]:
+        render_signal_card("ISM 제조업", format_value(ism, ""), ism_signal, "50 이상 확장, 50 미만 위축", ism_color)
+
+
 def render_macro_section(df: pd.DataFrame, lightweight: bool = True) -> None:
     st.markdown("### 미국/글로벌 매크로")
     st.caption("FRED | 병렬 호출 | 유동성, 채권/신용, 경기/물가, 환율/원자재")
@@ -1015,8 +1081,10 @@ def render_macro_section(df: pd.DataFrame, lightweight: bool = True) -> None:
         st.warning("미국/글로벌 매크로 데이터를 불러오지 못했습니다. 네트워크 권한 또는 FRED 응답을 확인하세요.")
         return
 
-    important = ["SOFR", "연준 지급준비금", "하이일드 스프레드", "미국채 10년-2년", "실업률", "무역가중 달러지수"]
-    render_metric_row(df, FRED_SERIES, [name for name in important if name in df.columns])
+    render_macro_signal_cards(df)
+    important = ["실업률", "비농업 고용 증감", "CPI", "Core CPI", "소매판매", "ISM 제조업"]
+    extra_specs = FRED_SERIES | {"샴룰 갭": {"unit": "%p"}}
+    render_metric_row(df, extra_specs, [name for name in important if name in df.columns])
 
     groups = {
         "유동성": [name for name, spec in FRED_SERIES.items() if spec["group"] == "유동성"],
@@ -1026,9 +1094,8 @@ def render_macro_section(df: pd.DataFrame, lightweight: bool = True) -> None:
     }
     if lightweight:
         groups = {
-            "유동성": [name for name in ["역레포 잔고", "재무부 일반계정", "연준 지급준비금", "SOFR"] if name in df.columns],
-            "채권/신용": [name for name in ["미국채 10년-2년", "하이일드 스프레드", "미국 10년 실질금리"] if name in df.columns],
-            "환율/원자재": [name for name in ["무역가중 달러지수", "WTI", "천연가스"] if name in df.columns],
+            "고용/물가": [name for name in ["실업률", "샴룰 갭", "Core CPI", "소매판매"] if name in df.columns],
+            "채권/신용": [name for name in ["미국채 10년-2년", "하이일드 스프레드"] if name in df.columns],
         }
 
     for row_start in range(0, len(groups), 2):
@@ -1050,7 +1117,12 @@ def render_macro_section(df: pd.DataFrame, lightweight: bool = True) -> None:
             display_df = format_dataframe(df, "%Y-%m")
             st.dataframe(display_df.sort_values("date", ascending=False), width="stretch", hide_index=True)
 
-    render_indicator_notes(FRED_SERIES, "미국/글로벌 지표 설명")
+    derived_specs = {
+        "샴룰 갭": {
+            "description": "최근 3개월 평균 실업률이 최근 1년 저점보다 얼마나 높아졌는지 보는 경기침체 경고 지표입니다. 0.5%p 이상이면 침체 경고로 봅니다."
+        }
+    }
+    render_indicator_notes(FRED_SERIES | derived_specs, "미국/글로벌 지표 설명")
 
 
 def render_market_proxy_section(df: pd.DataFrame, lightweight: bool = True) -> None:
@@ -1068,7 +1140,18 @@ def render_market_proxy_section(df: pd.DataFrame, lightweight: bool = True) -> N
     metric_cols = [name for name in ["비트코인", "금", "VIX", "S&P500", "나스닥"] if name in df.columns]
     render_metric_row(df, MARKET_PROXY_SERIES, metric_cols)
 
-    visible = df.tail(180 if lightweight else 360)
+    if lightweight:
+        visible = df.tail(756)
+        st.caption("경량 모드: 보조지표는 최근 약 3년만 표시합니다.")
+    else:
+        lookback_label = st.radio(
+            "시장 보조지표 표시 기간",
+            ["1년", "3년", "5년", "전체"],
+            index=2,
+            horizontal=True,
+        )
+        lookback_days = {"1년": 252, "3년": 756, "5년": 1260}
+        visible = df if lookback_label == "전체" else df.tail(lookback_days[lookback_label])
     price_cols = [col for col in ["비트코인", "금", "VIX"] if col in visible.columns]
     equity_cols = [col for col in ["S&P500", "나스닥"] if col in visible.columns]
     change_cols = [col for col in ["비트코인 1개월 변화율", "금 1개월 변화율", "S&P500 1개월 변화율", "나스닥 1개월 변화율"] if col in visible.columns]
@@ -1077,9 +1160,12 @@ def render_market_proxy_section(df: pd.DataFrame, lightweight: bool = True) -> N
     with price_col:
         st.markdown("#### 위험선호/안전자산")
         if price_cols:
-            st.line_chart(visible[price_cols], width="stretch")
+            normalized_prices = normalize_to_100(visible[price_cols])
+            st.line_chart(normalized_prices, width="stretch")
+            st.caption("가격 단위 차이가 커서 최근 구간 첫날을 100으로 맞춰 비교합니다.")
         if equity_cols and not lightweight:
-            st.line_chart(visible[equity_cols], width="stretch")
+            st.markdown("#### 미국 주가지수")
+            st.line_chart(normalize_to_100(visible[equity_cols]), width="stretch")
     with change_col:
         st.markdown("#### 1개월 변화율")
         if change_cols:
@@ -1107,12 +1193,13 @@ def render_news_card(article: dict) -> None:
 
 def render_dashboard_tab() -> None:
     lightweight = st.sidebar.toggle("모바일/공유용 경량 모드", value=True)
+    load_market_proxy = st.sidebar.checkbox("코인/금 보조지표 불러오기", value=not lightweight)
     if lightweight:
-        st.caption("경량 모드가 켜져 있어 외부 위젯, 큰 표, 일부 장기 차트 렌더링을 줄입니다.")
+        st.caption("경량 모드가 켜져 있어 외부 위젯, 보조 시세, 큰 표, 일부 장기 차트 렌더링을 줄입니다.")
 
     domestic = fetch_domestic_rates()
     macro = fetch_fred_macro_data()
-    market_proxy = fetch_market_proxy_data()
+    market_proxy = fetch_market_proxy_data() if load_market_proxy else pd.DataFrame()
     cross = build_cross_market_indicators(domestic, macro)
 
     render_market_guide()
@@ -1124,8 +1211,9 @@ def render_dashboard_tab() -> None:
     render_cross_market_section(cross)
     st.divider()
     render_macro_section(macro, lightweight=lightweight)
-    st.divider()
-    render_market_proxy_section(market_proxy, lightweight=lightweight)
+    if load_market_proxy:
+        st.divider()
+        render_market_proxy_section(market_proxy, lightweight=lightweight)
     st.divider()
     render_tradingview_widgets(lightweight=lightweight)
 
@@ -1182,7 +1270,7 @@ def main() -> None:
     )
 
     st.title("글로벌 자금 대시보드")
-    st.caption("대기업 자금담당자와 글로벌 매크로 투자자를 위한 무료 데이터 기반 시장 상황판")
+    st.caption("자금담당자와 글로벌 매크로 투자자를 위한 무료 데이터 기반 시장 상황판")
 
     tab_dashboard, tab_news = st.tabs(["시장 대시보드", "뉴스/캘린더"])
 
