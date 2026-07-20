@@ -727,7 +727,9 @@ def fetch_fred_macro_data() -> pd.DataFrame:
 
 @st.cache_data(ttl=900)
 def fetch_rss_news(feed_url: str) -> list[dict]:
-    feed = feedparser.parse(feed_url)
+    response = requests.get(feed_url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+    response.raise_for_status()
+    feed = feedparser.parse(response.content)
     articles: list[dict] = []
 
     if getattr(feed, "bozo", False) and getattr(feed, "bozo_exception", None):
@@ -750,6 +752,25 @@ def fetch_rss_news(feed_url: str) -> list[dict]:
         )
 
     return articles
+
+
+def fetch_news_feeds(feed_items: list[tuple[str, str]]) -> dict[str, list[dict]]:
+    results: dict[str, list[dict]] = {}
+    max_workers = min(6, len(feed_items))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(fetch_rss_news, feed_url): category
+            for category, feed_url in feed_items
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            category = future_map[future]
+            try:
+                results[category] = future.result()
+            except Exception as error:
+                results[category] = [{"title": f"뉴스를 불러오지 못했습니다: {error}", "link": "", "published": "", "summary": ""}]
+
+    return results
 
 
 def build_cross_market_indicators(domestic: pd.DataFrame, macro: pd.DataFrame) -> pd.DataFrame:
@@ -1324,21 +1345,21 @@ def render_news_calendar_tab() -> None:
 
     st.markdown("### 연합인포맥스 뉴스")
     feed_items = list(RSS_FEEDS.items())
+    with st.spinner("뉴스를 불러오는 중입니다..."):
+        news_by_category = fetch_news_feeds(feed_items)
+
     for row_start in range(0, len(feed_items), 2):
         cols = st.columns(2)
         for col, (category, feed_url) in zip(cols, feed_items[row_start : row_start + 2]):
             with col:
                 st.markdown(f"#### {category}")
                 with st.container(height=500):
-                    try:
-                        articles = fetch_rss_news(feed_url)
-                        if not articles:
-                            st.info("표시할 기사가 없습니다.")
-                            continue
-                        for article in articles[:max_articles]:
-                            render_news_card(article)
-                    except Exception as error:
-                        st.error(f"{category} 뉴스를 불러오지 못했습니다: {error}")
+                    articles = news_by_category.get(category, [])
+                    if not articles:
+                        st.info("표시할 기사가 없습니다.")
+                        continue
+                    for article in articles[:max_articles]:
+                        render_news_card(article)
 
     st.markdown("### 경제 캘린더")
     if st.checkbox("TradingView 경제 캘린더 불러오기", value=False):
