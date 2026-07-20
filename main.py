@@ -4,6 +4,7 @@ import json
 import os
 import re
 from datetime import date, datetime
+from io import StringIO
 
 import feedparser
 import pandas as pd
@@ -26,7 +27,9 @@ FRED_API_KEY = get_config_value("FRED_API_KEY")
 ECOS_BASE = f"https://ecos.bok.or.kr/api/StatisticSearch/{ECOS_API_KEY}/json/kr"
 ECOS_ITEM_BASE = f"https://ecos.bok.or.kr/api/StatisticItemList/{ECOS_API_KEY}/json/kr"
 FRED_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
+FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+CME_FEDWATCH_URL = "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"
 FRED_FETCH_ERRORS: dict[str, str] = {}
 ECOS_FETCH_ERRORS: dict[str, str] = {}
 MARKET_PROXY_ERRORS: dict[str, str] = {}
@@ -259,12 +262,12 @@ FRED_SERIES = {
         "transform": "mom",
         "description": "미국 소매판매의 전월 대비 변화율입니다. 미국 소비 모멘텀이 살아 있는지 확인하는 실물 지표입니다.",
     },
-    "ISM 제조업": {
-        "code": "NAPM",
-        "unit": "",
+    "제조업 생산 YoY": {
+        "code": "IPMAN",
+        "unit": "YoY %",
         "group": "경기/물가",
-        "transform": "level",
-        "description": "ISM 제조업 구매관리자지수입니다. 50 이상은 확장, 50 미만은 위축으로 해석합니다.",
+        "transform": "yoy",
+        "description": "미국 제조업 산업생산의 전년 대비 변화율입니다. ISM 직접 데이터가 FRED에서 안정적으로 제공되지 않을 때 제조업 경기의 실물 대체 지표로 봅니다.",
     },
     "무역가중 달러지수": {
         "code": "DTWEXBGS",
@@ -317,11 +320,52 @@ MARKET_PROXY_SERIES = {
     },
 }
 
+REFERENCE_LINKS = {
+    "미국 매크로/연준": [
+        ("CME FedWatch", CME_FEDWATCH_URL),
+        ("Atlanta Fed GDPNow", "https://www.atlantafed.org/cqer/research/gdpnow"),
+        ("FRED 데이터", "https://fred.stlouisfed.org/"),
+        ("Fed FOMC/점도표", "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"),
+        ("BLS 고용/CPI 발표", "https://www.bls.gov/schedule/news_release/"),
+        ("BEA GDP", "https://www.bea.gov/data/gdp/gross-domestic-product"),
+    ],
+    "경기/소비/기업": [
+        ("ISM PMI Reports", "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-pmi-reports/"),
+        ("Conference Board 지표", "https://www.conference-board.org/topics/us-leading-indicators"),
+        ("미시간 소비자심리", "https://www.sca.isr.umich.edu/"),
+        ("미 Census 경제지표", "https://www.census.gov/economic-indicators/"),
+    ],
+    "금리/채권/유동성": [
+        ("미 국채 금리", "https://home.treasury.gov/resource-center/data-chart-center/interest-rates"),
+        ("뉴욕연은 시장 데이터", "https://www.newyorkfed.org/markets/reference-rates"),
+        ("SOFR", "https://www.newyorkfed.org/markets/reference-rates/sofr"),
+        ("미 재무부 TGA/재정", "https://fiscaldata.treasury.gov/"),
+    ],
+    "원자재/에너지/시장": [
+        ("EIA 천연가스", "https://www.eia.gov/naturalgas/"),
+        ("EIA 원유/석유", "https://www.eia.gov/petroleum/"),
+        ("TradingView 히트맵", "https://www.tradingview.com/heatmap/stock/"),
+        ("Yahoo Finance", "https://finance.yahoo.com/"),
+    ],
+    "한국/국내 자금": [
+        ("한국은행 ECOS", "https://ecos.bok.or.kr/"),
+        ("한국은행 경제통계", "https://www.bok.or.kr/portal/main/main.do"),
+        ("금융투자협회 채권정보", "https://www.kofiabond.or.kr/"),
+        ("KRX 정보데이터", "https://data.krx.co.kr/"),
+    ],
+    "뉴스": [
+        ("연합인포맥스", "https://news.einfomax.co.kr/"),
+        ("Reuters Markets", "https://www.reuters.com/markets/"),
+        ("MarketWatch Economy", "https://www.marketwatch.com/economy-politics"),
+    ],
+}
+
 RSS_FEEDS = {
-    "부동산": "https://news.einfomax.co.kr/rss/S1N17.xml",
-    "해외주식": "https://news.einfomax.co.kr/rss/S1N21.xml",
-    "증권/기업": "https://news.einfomax.co.kr/rss/S1N7.xml",
+    "채권/외환": "https://news.einfomax.co.kr/rss/S1N16.xml",
     "정책/금융": "https://news.einfomax.co.kr/rss/S1N15.xml",
+    "IB/기업": "https://news.einfomax.co.kr/rss/S1N7.xml",
+    "해외주식": "https://news.einfomax.co.kr/rss/S1N21.xml",
+    "부동산": "https://news.einfomax.co.kr/rss/S1N17.xml",
 }
 
 MARKET_GUIDE = {
@@ -459,9 +503,6 @@ def rows_to_series(rows: list[dict], cycle: str) -> pd.Series:
 
 
 def fred_to_monthly_series(series_id: str | list[str]) -> pd.Series:
-    if not FRED_API_KEY:
-        raise ValueError("FRED_API_KEY가 설정되어 있지 않습니다. Streamlit secrets 또는 환경변수에 추가하세요.")
-
     if isinstance(series_id, list):
         last_error: Exception | None = None
         for candidate in series_id:
@@ -473,6 +514,22 @@ def fred_to_monthly_series(series_id: str | list[str]) -> pd.Series:
             raise last_error
         return pd.Series(dtype=float)
 
+    api_error: Exception | None = None
+    if FRED_API_KEY:
+        try:
+            return fred_api_to_monthly_series(series_id)
+        except Exception as error:
+            api_error = error
+
+    try:
+        return fred_csv_to_monthly_series(series_id)
+    except Exception as csv_error:
+        if api_error is not None:
+            raise ValueError(f"FRED API 실패: {api_error} | CSV 백업 실패: {csv_error}") from csv_error
+        raise csv_error
+
+
+def fred_api_to_monthly_series(series_id: str) -> pd.Series:
     params = {
         "series_id": series_id,
         "api_key": FRED_API_KEY,
@@ -489,6 +546,20 @@ def fred_to_monthly_series(series_id: str | list[str]) -> pd.Series:
     df = pd.DataFrame(observations)
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    series = df.dropna(subset=["date"]).set_index("date")["value"].sort_index()
+    return series.resample("ME").last().dropna()
+
+
+def fred_csv_to_monthly_series(series_id: str) -> pd.Series:
+    response = requests.get(FRED_CSV_URL, params={"id": series_id}, timeout=30)
+    response.raise_for_status()
+    df = pd.read_csv(StringIO(response.text))
+    if "observation_date" not in df.columns or series_id not in df.columns:
+        raise ValueError(f"FRED CSV 형식이 예상과 다릅니다: {series_id}")
+
+    df["date"] = pd.to_datetime(df["observation_date"], errors="coerce")
+    df["value"] = pd.to_numeric(df[series_id], errors="coerce")
+    df = df[df["date"] >= pd.to_datetime(FRED_START)]
     series = df.dropna(subset=["date"]).set_index("date")["value"].sort_index()
     return series.resample("ME").last().dropna()
 
@@ -1058,11 +1129,11 @@ def render_macro_signal_cards(df: pd.DataFrame) -> None:
 
     sahm_gap = latest_value(df, "샴룰 갭")
     core_cpi = latest_value(df, "Core CPI")
-    ism = latest_value(df, "ISM 제조업")
+    manufacturing = latest_value(df, "제조업 생산 YoY")
 
     sahm_signal, sahm_color = signal_from_value(sahm_gap, 0.3, 0.5)
     cpi_signal, cpi_color = signal_from_value(core_cpi, 3.0, 4.0)
-    ism_signal, ism_color = signal_from_value(ism, 50.0, 47.0, higher_is_risk=False)
+    manufacturing_signal, manufacturing_color = signal_from_value(manufacturing, 0.0, -2.0, higher_is_risk=False)
 
     cols = st.columns(3)
     with cols[0]:
@@ -1070,7 +1141,13 @@ def render_macro_signal_cards(df: pd.DataFrame) -> None:
     with cols[1]:
         render_signal_card("Core CPI", format_value(core_cpi, "%"), cpi_signal, "물가가 높을수록 금리 인하 여지 축소", cpi_color)
     with cols[2]:
-        render_signal_card("ISM 제조업", format_value(ism, ""), ism_signal, "50 이상 확장, 50 미만 위축", ism_color)
+        render_signal_card("제조업 생산", format_value(manufacturing, "%"), manufacturing_signal, "전년 대비 0% 아래면 둔화 신호", manufacturing_color)
+
+
+def render_fedwatch_section(lightweight: bool = True) -> None:
+    st.markdown("#### FOMC 금리 기대")
+    st.caption("CME가 앱 내부 iframe 표시를 차단하므로 공식 페이지를 새 창으로 엽니다.")
+    st.link_button("CME FedWatch 새 창", CME_FEDWATCH_URL)
 
 
 def render_macro_section(df: pd.DataFrame, lightweight: bool = True) -> None:
@@ -1079,10 +1156,15 @@ def render_macro_section(df: pd.DataFrame, lightweight: bool = True) -> None:
 
     if df.empty:
         st.warning("미국/글로벌 매크로 데이터를 불러오지 못했습니다. 네트워크 권한 또는 FRED 응답을 확인하세요.")
+        if FRED_FETCH_ERRORS:
+            with st.expander("FRED 수집 실패 상세", expanded=True):
+                for label, error in FRED_FETCH_ERRORS.items():
+                    st.write(f"{label}: {error}")
         return
 
     render_macro_signal_cards(df)
-    important = ["실업률", "비농업 고용 증감", "CPI", "Core CPI", "소매판매", "ISM 제조업"]
+    render_fedwatch_section(lightweight=lightweight)
+    important = ["실업률", "비농업 고용 증감", "CPI", "Core CPI", "소매판매", "제조업 생산 YoY"]
     extra_specs = FRED_SERIES | {"샴룰 갭": {"unit": "%p"}}
     render_metric_row(df, extra_specs, [name for name in important if name in df.columns])
 
@@ -1191,6 +1273,21 @@ def render_news_card(article: dict) -> None:
             st.write(preview + ("..." if len(article["summary"]) > 180 else ""))
 
 
+def render_reference_links() -> None:
+    st.markdown("### 참고 사이트")
+    st.caption("자금시장, 미국 매크로, 원자재, 국내 자금 자료를 볼 때 자주 쓰는 무료/공식 사이트입니다.")
+
+    for row_start in range(0, len(REFERENCE_LINKS), 2):
+        cols = st.columns(2)
+        for col, (category, links) in zip(cols, list(REFERENCE_LINKS.items())[row_start : row_start + 2]):
+            with col:
+                with st.container(border=True):
+                    st.markdown(f"#### {category}")
+                    button_cols = st.columns(2)
+                    for index, (label, url) in enumerate(links):
+                        button_cols[index % 2].link_button(label, url)
+
+
 def render_dashboard_tab() -> None:
     lightweight = st.sidebar.toggle("모바일/공유용 경량 모드", value=True)
     load_market_proxy = st.sidebar.checkbox("코인/금 보조지표 불러오기", value=not lightweight)
@@ -1219,10 +1316,13 @@ def render_dashboard_tab() -> None:
 
 
 def render_news_calendar_tab() -> None:
-    st.subheader("뉴스/캘린더")
-    st.caption("연합인포맥스 RSS와 TradingView 경제 캘린더")
+    st.subheader("시장 뉴스")
+    st.caption("연합인포맥스 RSS와 주요 경제 캘린더를 가볍게 확인합니다.")
+    max_articles = st.sidebar.slider("뉴스 표시 개수", min_value=5, max_value=50, value=15, step=5)
 
-    st.markdown("### 연합인포맥스 실시간 뉴스")
+    st.info("금리·환율·유동성 차트는 왼쪽 사이드바에서 **시장 대시보드**를 선택하면 볼 수 있습니다.")
+
+    st.markdown("### 연합인포맥스 뉴스")
     feed_items = list(RSS_FEEDS.items())
     for row_start in range(0, len(feed_items), 2):
         cols = st.columns(2)
@@ -1235,7 +1335,7 @@ def render_news_calendar_tab() -> None:
                         if not articles:
                             st.info("표시할 기사가 없습니다.")
                             continue
-                        for article in articles:
+                        for article in articles[:max_articles]:
                             render_news_card(article)
                     except Exception as error:
                         st.error(f"{category} 뉴스를 불러오지 못했습니다: {error}")
@@ -1256,29 +1356,34 @@ def render_news_calendar_tab() -> None:
     else:
         st.info("경제 캘린더는 외부 위젯이라 필요할 때만 불러오도록 꺼두었습니다.")
 
-    st.markdown("### 외부 자료 바로가기")
-    link_cols = st.columns(2)
-    link_cols[0].link_button("TradingView 히트맵", "https://www.tradingview.com/heatmap/stock/")
-    link_cols[1].link_button("FRED 데이터", "https://fred.stlouisfed.org/")
+    render_reference_links()
 
 
 def main() -> None:
     st.set_page_config(
-        page_title="글로벌 자금 대시보드",
-        page_icon="📈",
+        page_title="글로벌 머니 모니터",
+        page_icon="🌐",
         layout="wide",
     )
 
-    st.title("글로벌 자금 대시보드")
-    st.caption("자금담당자와 글로벌 매크로 투자자를 위한 무료 데이터 기반 시장 상황판")
+    st.title("글로벌 머니 모니터")
+    st.caption("금리, 환율, 유동성, 신용위험, 주요 뉴스를 함께 보는 시장 모니터")
 
-    tab_dashboard, tab_news = st.tabs(["시장 대시보드", "뉴스/캘린더"])
+    st.sidebar.title("글로벌 머니 모니터")
+    st.sidebar.caption("뉴스와 시장 대시보드를 선택해서 봅니다.")
+    page = st.sidebar.radio(
+        "메뉴",
+        ["뉴스/캘린더", "시장 대시보드"],
+        index=0,
+        captions=["빠른 뉴스와 일정", "금리·환율·유동성 차트"],
+    )
+    st.sidebar.divider()
+    st.sidebar.markdown(f"**현재 화면:** {page}")
 
-    with tab_dashboard:
-        render_dashboard_tab()
-
-    with tab_news:
+    if page == "뉴스/캘린더":
         render_news_calendar_tab()
+    else:
+        render_dashboard_tab()
 
 
 if __name__ == "__main__":
