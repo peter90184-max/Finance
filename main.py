@@ -5,6 +5,7 @@ import os
 import re
 from datetime import date, datetime
 from io import StringIO
+from urllib.parse import quote_plus
 
 import feedparser
 import pandas as pd
@@ -368,6 +369,14 @@ RSS_FEEDS = {
     "부동산": "https://news.einfomax.co.kr/rss/S1N17.xml",
 }
 
+RSS_FALLBACK_QUERIES = {
+    "채권/외환": "site:news.einfomax.co.kr 연합인포맥스 채권 외환",
+    "정책/금융": "site:news.einfomax.co.kr 연합인포맥스 정책 금융",
+    "IB/기업": "site:news.einfomax.co.kr 연합인포맥스 IB 기업",
+    "해외주식": "site:news.einfomax.co.kr 연합인포맥스 해외주식",
+    "부동산": "site:news.einfomax.co.kr 연합인포맥스 부동산",
+}
+
 MARKET_GUIDE = {
     "자금담당자 관점": [
         "AA-와 BBB- 스프레드는 우량/비우량 조달 여건의 온도차를 보여줍니다.",
@@ -726,8 +735,25 @@ def fetch_fred_macro_data() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=900)
-def fetch_rss_news(feed_url: str) -> list[dict]:
-    response = requests.get(feed_url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+def fetch_rss_news(feed_url: str, fallback_query: str = "") -> list[dict]:
+    try:
+        return parse_rss_url(feed_url)
+    except Exception as primary_error:
+        if not fallback_query:
+            raise primary_error
+
+    fallback_url = (
+        "https://news.google.com/rss/search?"
+        f"q={quote_plus(fallback_query)}&hl=ko&gl=KR&ceid=KR:ko"
+    )
+    try:
+        return parse_rss_url(fallback_url)
+    except Exception as fallback_error:
+        raise ValueError(f"직접 RSS와 백업 뉴스 검색이 모두 실패했습니다: {fallback_error}") from fallback_error
+
+
+def parse_rss_url(feed_url: str) -> list[dict]:
+    response = requests.get(feed_url, timeout=(4, 12), headers={"User-Agent": "Mozilla/5.0"})
     response.raise_for_status()
     feed = feedparser.parse(response.content)
     articles: list[dict] = []
@@ -760,7 +786,7 @@ def fetch_news_feeds(feed_items: list[tuple[str, str]]) -> dict[str, list[dict]]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {
-            executor.submit(fetch_rss_news, feed_url): category
+            executor.submit(fetch_rss_news, feed_url, RSS_FALLBACK_QUERIES.get(category, "")): category
             for category, feed_url in feed_items
         }
         for future in concurrent.futures.as_completed(future_map):
@@ -768,7 +794,14 @@ def fetch_news_feeds(feed_items: list[tuple[str, str]]) -> dict[str, list[dict]]
             try:
                 results[category] = future.result()
             except Exception as error:
-                results[category] = [{"title": f"뉴스를 불러오지 못했습니다: {error}", "link": "", "published": "", "summary": ""}]
+                results[category] = [
+                    {
+                        "title": "뉴스 접속이 지연되고 있습니다.",
+                        "link": "https://news.einfomax.co.kr/",
+                        "published": "",
+                        "summary": f"{category} RSS가 현재 응답하지 않습니다. 연합인포맥스 원문 사이트에서 확인하세요.",
+                    }
+                ]
 
     return results
 
@@ -1344,6 +1377,7 @@ def render_news_calendar_tab() -> None:
     st.info("금리·환율·유동성 차트는 왼쪽 사이드바에서 **시장 대시보드**를 선택하면 볼 수 있습니다.")
 
     st.markdown("### 연합인포맥스 뉴스")
+    st.caption("직접 RSS가 느리면 Google 뉴스 RSS 검색으로 자동 우회합니다.")
     feed_items = list(RSS_FEEDS.items())
     with st.spinner("뉴스를 불러오는 중입니다..."):
         news_by_category = fetch_news_feeds(feed_items)
@@ -1353,7 +1387,7 @@ def render_news_calendar_tab() -> None:
         for col, (category, feed_url) in zip(cols, feed_items[row_start : row_start + 2]):
             with col:
                 st.markdown(f"#### {category}")
-                with st.container(height=500):
+                with st.container(height=420):
                     articles = news_by_category.get(category, [])
                     if not articles:
                         st.info("표시할 기사가 없습니다.")
