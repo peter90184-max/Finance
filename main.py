@@ -370,11 +370,11 @@ RSS_FEEDS = {
 }
 
 RSS_FALLBACK_QUERIES = {
-    "채권/외환": "site:news.einfomax.co.kr 연합인포맥스 채권 외환",
-    "정책/금융": "site:news.einfomax.co.kr 연합인포맥스 정책 금융",
-    "IB/기업": "site:news.einfomax.co.kr 연합인포맥스 IB 기업",
-    "해외주식": "site:news.einfomax.co.kr 연합인포맥스 해외주식",
-    "부동산": "site:news.einfomax.co.kr 연합인포맥스 부동산",
+    "채권/외환": "site:news.einfomax.co.kr 연합인포맥스 채권 외환 when:7d",
+    "정책/금융": "site:news.einfomax.co.kr 연합인포맥스 정책 금융 when:7d",
+    "IB/기업": "site:news.einfomax.co.kr 연합인포맥스 IB 기업 when:7d",
+    "해외주식": "site:news.einfomax.co.kr 연합인포맥스 해외주식 when:7d",
+    "부동산": "site:news.einfomax.co.kr 연합인포맥스 부동산 when:7d",
 }
 
 MARKET_GUIDE = {
@@ -763,8 +763,11 @@ def parse_rss_url(feed_url: str) -> list[dict]:
 
     for entry in feed.entries:
         published = entry.get("published", "")
+        published_ts = 0.0
         if entry.get("published_parsed"):
-            published = datetime(*entry.published_parsed[:6]).strftime("%Y-%m-%d %H:%M")
+            published_dt = datetime(*entry.published_parsed[:6])
+            published = published_dt.strftime("%Y-%m-%d %H:%M")
+            published_ts = published_dt.timestamp()
 
         summary = html.unescape(re.sub(r"<[^>]+>", "", entry.get("summary", ""))).strip()
         title = html.unescape(entry.get("title", "제목 없음")).strip()
@@ -773,11 +776,12 @@ def parse_rss_url(feed_url: str) -> list[dict]:
                 "title": title,
                 "link": entry.get("link", ""),
                 "published": published,
+                "published_ts": published_ts,
                 "summary": summary,
             }
         )
 
-    return articles
+    return sorted(articles, key=lambda article: article.get("published_ts", 0), reverse=True)
 
 
 def fetch_news_feeds(feed_items: list[tuple[str, str]]) -> dict[str, list[dict]]:
@@ -799,6 +803,7 @@ def fetch_news_feeds(feed_items: list[tuple[str, str]]) -> dict[str, list[dict]]
                         "title": "뉴스 접속이 지연되고 있습니다.",
                         "link": "https://news.einfomax.co.kr/",
                         "published": "",
+                        "published_ts": 0,
                         "summary": f"{category} RSS가 현재 응답하지 않습니다. 연합인포맥스 원문 사이트에서 확인하세요.",
                     }
                 ]
