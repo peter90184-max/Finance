@@ -42,6 +42,14 @@ TODAY = date.today()
 END_MONTH = TODAY.strftime("%Y%m")
 END_DAY = TODAY.strftime("%Y%m%d")
 
+BOK_BASE_RATE_OVERRIDES = [
+    {
+        "date": "2026-07-16",
+        "value": 2.75,
+        "note": "한국은행 금융통화위원회가 2026-07-16 기준금리를 2.50%에서 2.75%로 인상",
+    }
+]
+
 DOMESTIC_SERIES = {
     "기준금리": {
         "stat": "722Y001",
@@ -583,6 +591,18 @@ def transform_fred_series(series: pd.Series, transform: str) -> pd.Series:
     return series
 
 
+def apply_bok_base_rate_overrides(frame: pd.DataFrame) -> pd.DataFrame:
+    if "기준금리" not in frame.columns:
+        return frame
+
+    adjusted = frame.copy()
+    for event in BOK_BASE_RATE_OVERRIDES:
+        event_date = pd.to_datetime(event["date"])
+        if adjusted.index.max() >= event_date:
+            adjusted.loc[adjusted.index >= event_date, "기준금리"] = float(event["value"])
+    return adjusted
+
+
 @st.cache_data(ttl=3600)
 def fetch_domestic_rates() -> pd.DataFrame:
     ECOS_FETCH_ERRORS.clear()
@@ -621,6 +641,7 @@ def fetch_domestic_rates() -> pd.DataFrame:
 
     ordered_cols = [name for name in DOMESTIC_SERIES if name in merged.columns]
     merged = merged[ordered_cols].ffill()
+    merged = apply_bok_base_rate_overrides(merged)
 
     if {"회사채 AA- 3년", "국고채 3년"}.issubset(merged.columns):
         merged["AA- vs 국고채 스프레드"] = merged["회사채 AA- 3년"] - merged["국고채 3년"]
@@ -984,6 +1005,7 @@ def render_data_source_diagnostics() -> None:
                 st.write(f"{label}: {error}")
         if not ECOS_FETCH_ERRORS and not FRED_FETCH_ERRORS and not MARKET_PROXY_ERRORS:
             st.caption("현재 세션에서 기록된 API 오류가 없습니다.")
+        st.caption("기준금리는 ECOS 반영 지연에 대비해 한국은행 2026-07-16 인상분(2.75%)을 일간 차트에 보정 반영합니다.")
 
 
 def render_metric_row(frame: pd.DataFrame, specs: dict[str, dict], columns: list[str]) -> None:
@@ -1351,30 +1373,24 @@ def render_dashboard_tab() -> None:
     lightweight = st.sidebar.toggle("모바일/공유용 경량 모드", value=True)
     dashboard_section = st.sidebar.radio(
         "대시보드 섹션",
-        ["핵심 신호", "국내/환헤지", "미국 매크로", "시장 보조지표", "히트맵"],
+        ["국내/핵심 신호", "미국 매크로", "시장 보조지표", "히트맵"],
         index=0,
     )
     if lightweight:
         st.caption("경량 모드가 켜져 있어 외부 위젯, 보조 시세, 큰 표, 일부 장기 차트 렌더링을 줄입니다.")
 
-    if dashboard_section == "핵심 신호":
+    if dashboard_section == "국내/핵심 신호":
         domestic = fetch_domestic_rates()
         macro = fetch_fred_macro_data()
         cross = build_cross_market_indicators(domestic, macro)
         render_market_guide()
         render_data_source_diagnostics()
         render_market_summary(domestic, macro, cross)
-        st.info("세부 차트는 왼쪽 사이드바의 **대시보드 섹션**에서 선택해서 봅니다.")
-        return
-
-    if dashboard_section == "국내/환헤지":
-        domestic = fetch_domestic_rates()
-        macro = fetch_fred_macro_data()
-        cross = build_cross_market_indicators(domestic, macro)
-        render_data_source_diagnostics()
+        st.divider()
         render_domestic_section(domestic, lightweight=lightweight)
         st.divider()
         render_cross_market_section(cross)
+        st.info("미국 매크로, 보조지표, 히트맵은 왼쪽 사이드바의 **대시보드 섹션**에서 따로 선택해서 봅니다.")
         return
 
     if dashboard_section == "미국 매크로":
