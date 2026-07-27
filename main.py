@@ -1349,28 +1349,46 @@ def render_reference_links() -> None:
 
 def render_dashboard_tab() -> None:
     lightweight = st.sidebar.toggle("모바일/공유용 경량 모드", value=True)
-    load_market_proxy = st.sidebar.checkbox("코인/금 보조지표 불러오기", value=not lightweight)
+    dashboard_section = st.sidebar.radio(
+        "대시보드 섹션",
+        ["핵심 신호", "국내/환헤지", "미국 매크로", "시장 보조지표", "히트맵"],
+        index=0,
+    )
     if lightweight:
         st.caption("경량 모드가 켜져 있어 외부 위젯, 보조 시세, 큰 표, 일부 장기 차트 렌더링을 줄입니다.")
 
-    domestic = fetch_domestic_rates()
-    macro = fetch_fred_macro_data()
-    market_proxy = fetch_market_proxy_data() if load_market_proxy else pd.DataFrame()
-    cross = build_cross_market_indicators(domestic, macro)
+    if dashboard_section == "핵심 신호":
+        domestic = fetch_domestic_rates()
+        macro = fetch_fred_macro_data()
+        cross = build_cross_market_indicators(domestic, macro)
+        render_market_guide()
+        render_data_source_diagnostics()
+        render_market_summary(domestic, macro, cross)
+        st.info("세부 차트는 왼쪽 사이드바의 **대시보드 섹션**에서 선택해서 봅니다.")
+        return
 
-    render_market_guide()
-    render_data_source_diagnostics()
-    render_market_summary(domestic, macro, cross)
-    st.divider()
-    render_domestic_section(domestic, lightweight=lightweight)
-    st.divider()
-    render_cross_market_section(cross)
-    st.divider()
-    render_macro_section(macro, lightweight=lightweight)
-    if load_market_proxy:
+    if dashboard_section == "국내/환헤지":
+        domestic = fetch_domestic_rates()
+        macro = fetch_fred_macro_data()
+        cross = build_cross_market_indicators(domestic, macro)
+        render_data_source_diagnostics()
+        render_domestic_section(domestic, lightweight=lightweight)
         st.divider()
+        render_cross_market_section(cross)
+        return
+
+    if dashboard_section == "미국 매크로":
+        macro = fetch_fred_macro_data()
+        render_data_source_diagnostics()
+        render_macro_section(macro, lightweight=lightweight)
+        return
+
+    if dashboard_section == "시장 보조지표":
+        market_proxy = fetch_market_proxy_data()
+        render_data_source_diagnostics()
         render_market_proxy_section(market_proxy, lightweight=lightweight)
-    st.divider()
+        return
+
     render_tradingview_widgets(lightweight=lightweight)
 
 
